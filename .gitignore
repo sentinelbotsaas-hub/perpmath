@@ -1,0 +1,24 @@
+# Local market-data cache (re-create with `perpmath download`)
+data/
+
+# Never commit environment files or credentials. perpmath 0.1 needs none.
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
