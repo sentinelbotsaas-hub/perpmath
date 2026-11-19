@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perpmath"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small, honest backtester for crypto perpetual-futures strategies on Bybit public data. Backtest only."
 readme = "README.md"
 requires-python = ">=3.10"

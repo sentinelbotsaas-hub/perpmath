@@ -1,4 +1,6 @@
-"""Command line: ``perpmath download`` and ``perpmath backtest``.
+"""Command line: ``perpmath download``, ``perpmath backtest``, ``perpmath funding`` and ``perpmath grid``.
+
+The last two are defined in ``grid_backtest.py``.
 
 Exit codes: 0 = success, 1 = bad data, bad config or failed look-ahead check,
 2 = bad command-line usage.
@@ -15,6 +17,7 @@ from . import __version__
 from .backtest import ConfigError, LookaheadError, load_config, run_backtest, write_result
 from .data import (INTERVALS, DataError, cache_path, download, file_sha256, interval_ms, iso_utc,
                    load_bars, parse_date_ms)
+from .grid_backtest import add_grid_commands
 from .strategies import STRATEGIES
 
 DAY_MS = 86_400_000
@@ -99,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--end", help="use only bars before this date (YYYY-MM-DD, UTC)")
     bt.add_argument("--data-dir", default="data")
     bt.set_defaults(func=_cmd_backtest)
+
+    add_grid_commands(sub)
     return parser
 
 
