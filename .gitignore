@@ -1,11 +1,15 @@
 # Local market-data cache (re-create with `perpmath download`)
 data/
 
-# Never commit environment files or credentials. perpmath 0.1 needs none.
+# Never commit environment files or credentials.
 .env
 .env.*
+!.env.example
 *.pem
 *.key
+
+# perpmath live state files (positions, order IDs; no credentials)
+.perpmath-live/
 
 # Python
 __pycache__/
