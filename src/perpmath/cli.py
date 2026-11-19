@@ -1,7 +1,8 @@
-"""Command line: ``perpmath download`` and ``perpmath backtest``.
+"""Command line: ``perpmath download``, ``perpmath backtest`` and ``perpmath live``.
 
 Exit codes: 0 = success, 1 = bad data, bad config or failed look-ahead check,
-2 = bad command-line usage.
+2 = bad command-line usage, 3 = ``live`` stopped by a circuit breaker or a
+failed reconciliation.
 """
 
 from __future__ import annotations
@@ -71,11 +72,44 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_live(args: argparse.Namespace) -> int:
+    # Imported here so that `download` and `backtest` never load the order code.
+    from .live import (BybitClient, Halted, KeyPermissionError, LiveConfigError, LiveRunner, StartupError,
+                       TestnetOnlyError, load_live_config, read_credentials)
+    from .live.bybit import MAINNET_REFUSAL, BybitError, NetworkError
+
+    if args.mainnet:
+        print(f"error: {MAINNET_REFUSAL}", file=sys.stderr)
+        return 1
+    try:
+        params, config = load_live_config(args.config, args.strategy)
+        interval_ms(args.interval)
+        if args.dry_run:
+            client = BybitClient(recv_window_ms=config.recv_window_ms)   # no key: cannot sign anything
+        else:
+            key, secret = read_credentials()
+            client = BybitClient(key, secret, recv_window_ms=config.recv_window_ms, broker_id=config.broker_id)
+        runner = LiveRunner(args.strategy, params, config, args.symbol, args.interval, client, args.dry_run)
+        runner.start(clear_halt=args.clear_halt)
+        runner.run(once=args.once)
+    except Halted as exc:
+        print(f"HALTED: {exc}", file=sys.stderr)
+        print("Any open position keeps the stop-loss that is on Bybit. Nothing else was closed.", file=sys.stderr)
+        return 3
+    except (LiveConfigError, KeyPermissionError, StartupError, TestnetOnlyError, BybitError, NetworkError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("stopped by user. Any open position keeps its stop-loss on Bybit.", file=sys.stderr)
+        return 0
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="perpmath",
-        description="Backtest crypto perpetual-futures strategies on Bybit public data. "
-                    "Backtest only: no live trading, no API keys.",
+        description="Backtest crypto perpetual-futures strategies on Bybit public data, and run them "
+                    "on the Bybit testnet (0.2: testnet only, never mainnet).",
     )
     parser.add_argument("--version", action="version", version=f"perpmath {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -99,6 +133,19 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--end", help="use only bars before this date (YYYY-MM-DD, UTC)")
     bt.add_argument("--data-dir", default="data")
     bt.set_defaults(func=_cmd_backtest)
+
+    lv = sub.add_parser("live", help="run a strategy on the Bybit TESTNET (or --dry-run without any key)")
+    lv.add_argument("strategy", choices=sorted(STRATEGIES))
+    lv.add_argument("--symbol", required=True, help="USDT perpetual, for example BTCUSDT")
+    lv.add_argument("--interval", required=True, choices=list(INTERVALS))
+    lv.add_argument("--config", required=True, help="JSON file with params and a 'live' section")
+    lv.add_argument("--dry-run", action="store_true",
+                    help="no key, no signed request, no order: print the orders it would send")
+    lv.add_argument("--once", action="store_true", help="handle the latest closed bar, then exit")
+    lv.add_argument("--clear-halt", action="store_true",
+                    help="clear a halt recorded by a circuit breaker (after you have checked why)")
+    lv.add_argument("--mainnet", action="store_true", help=argparse.SUPPRESS)
+    lv.set_defaults(func=_cmd_live)
     return parser
 
 

@@ -1,6 +1,7 @@
 """perpmath: a small, honest backtester for crypto perpetual-futures strategies.
 
-Backtest only. No live trading, no order placement, no API keys.
+The backtester needs no account and no API key. ``perpmath.live`` (0.2) can
+run the same strategies on the Bybit testnet only; it never connects to mainnet.
 """
 
 __version__ = "0.1.0"
