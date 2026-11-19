@@ -3,7 +3,7 @@
 Backtest only. No live trading, no order placement, no API keys.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .backtest import LookaheadError, check_no_lookahead, run_backtest
 from .data import Bars, DataError, load_bars

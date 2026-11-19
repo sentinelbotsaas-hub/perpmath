@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.0 - unreleased
+
+Grid backtest.
+
+- `perpmath grid`: a separate simulator for grid trading (`grid.py`), since a
+  grid holds many positions at once. Neutral, long and short grids;
+  arithmetic or geometric levels; leverage with isolated-margin liquidation
+  (maintenance margin rule as on perpmath.com); `continue`, `stop` or `close`
+  when price leaves the range.
+- Intrabar path stated and tested: by default each bar is walked both
+  low-first and high-first and the path with lower equity is kept. The
+  result file reports the other paths, taker-fee grid fills and a run without
+  funding next to the headline numbers.
+- `perpmath funding`: downloader for Bybit public funding-rate history.
+  Grid runs charge or credit funding at every settlement and fail if the
+  funding file has gaps.
+- Maker fee (0.02%) for grid fills, taker fee (0.055%) for market orders,
+  both Bybit VIP 0 rates read 2026-11-19.
+- `configs/grid.json` and `results/grid-btcusdt.json`: neutral, geometric,
+  50 cells, leverage 1, bounds from the in-sample range, fixed once and not
+  searched. The in-sample block uses hindsight bounds and is flagged as such.
+- Grid result file documented in `docs/output-format.md`.
+
 ## 0.1.0 (unreleased)
 
 First public version. Backtest only.
