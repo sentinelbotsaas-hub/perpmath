@@ -438,11 +438,16 @@ def _rates_at_closes(bars: Bars, start: int, end: int, step_ms: int,
 
 
 def simulate_grid(bars: Bars, config: GridConfig, start: int = 0, end: Optional[int] = None,
-                  funding: Optional[FundingRates] = None, step_ms: Optional[int] = None) -> GridResult:
+                  funding: Optional[FundingRates] = None, step_ms: Optional[int] = None,
+                  close_at_end: bool = True) -> GridResult:
     """Run the grid on bars ``[start, end)``. The grid is placed at the open of bar ``start``.
 
     ``step_ms`` is the bar length, used to put funding at bar closes; by
     default the shortest gap between bar open times.
+
+    ``close_at_end=False`` leaves the position open after the last bar, so
+    that bar ends exactly as it would in a longer run. Only the look-ahead
+    check uses it; a result always closes at the end.
     """
     config.validate()
     n = len(bars)
@@ -484,7 +489,7 @@ def simulate_grid(bars: Bars, config: GridConfig, start: int = 0, end: Optional[
             funding_events += 1
             grid._liquidate_if_needed(st, i, c, events)
 
-        if i == end - 1:
+        if i == end - 1 and close_at_end:
             grid.close_all(st, i, c, "end", events)
         if c < lower or c > upper:
             outside += 1

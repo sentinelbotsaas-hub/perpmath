@@ -115,6 +115,29 @@ def test_sweep_of_both_sides_gives_no_signal():
     assert not run("liquidity_sweep", rows, **SWEEP).side.any()
 
 
+# Rule 4, cases b and c: the bar trades through the prior high (12) AND the prior low (9.5) and closes
+# outside the old range. Pinned as shipped: changing it would change the published results.
+BOTH_SIDES = (11.5, 12.5, 9.0)              # open, high, low; true range 3.5, so the stop buffer is 0.35
+
+
+@pytest.mark.parametrize("close, side, stop", [
+    (12.2, 1, 9.0 - 0.35),      # closes above the prior high: counted as a low sweep, long, stop under the low
+    (12.0, 1, 9.0 - 0.35),      # exactly on the prior high: the same
+    (9.2, -1, 12.5 + 0.35),     # closes below the prior low: counted as a high sweep, short, stop over the high
+    (9.5, -1, 12.5 + 0.35),     # exactly on the prior low: the same
+])
+def test_bar_through_both_sides_that_closes_outside_is_traded_as_a_sweep_of_the_far_side(close, side, stop):
+    signals = run("liquidity_sweep", RANGE + [BOTH_SIDES + (close,)], **SWEEP)
+    assert signals.side.tolist() == [0, 0, 0, side]
+    assert signals.stop[3] == pytest.approx(stop)
+    assert signals.target_r[3] == 2.0
+
+
+@pytest.mark.parametrize("close", [9.6, 10.0, 11.9])
+def test_bar_through_both_sides_that_closes_inside_gives_no_signal(close):
+    assert not run("liquidity_sweep", RANGE + [BOTH_SIDES + (close,)], **SWEEP).side.any()
+
+
 def test_sweep_does_not_count_the_current_bar_in_the_prior_range():
     rows = RANGE + [(11.5, 11.9, 11.2, 11.8)]     # high 11.9 is below the prior high of 12
     assert not run("liquidity_sweep", rows, **SWEEP).side.any()

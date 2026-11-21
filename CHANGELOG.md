@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.2.2 - unreleased
+
+A stronger look-ahead check, and one `liquidity_sweep` rule written out. No
+result number changes: the six strategy results and the grid result were
+re-run and are identical outside `package_version`, `generated_at` and
+`timing.lookahead_check`. The shipped files in `results/` have not been
+rewritten yet and still carry the old check's `"shortened_runs": 9`.
+
+### Look-ahead check
+
+- **The old check let short look-ahead through.** It cut the data at nine
+  fixed points. A strategy that looks one or a few bars ahead differs from
+  the full run only on the last bars of a shortened copy, so whether it was
+  caught depended on where the cuts fell. `ma_cross` with every decision
+  moved one bar early passed on the shipped year with 9 cuts, failed with
+  17, passed with 65 and failed with 129, and a passing run was written with
+  `lookahead_check: passed`. The README sentence "if any decision on a bar
+  changes when later bars are removed, the run stops" claimed more than the
+  check did.
+- New check, `check_lookahead_at_signals`, used by `run_backtest` and the
+  CLI. The data is cut right after every bar on which the full run decided
+  something (entry, stop, target or exit flag) and the decision there must
+  be the same without the later bars. A strategy that decides one bar early
+  now fails at its first signal bar on any data.
+- Look-ahead that only *removes* signals cannot be seen from signal bars
+  (the signals that remain all hold up). An `order_block` that uses swing
+  points from the pivot bar on is of this kind: on the shipped year all 374
+  of its signal bars pass. So the data is also cut after every one of the
+  first 4,000 bars and after 500 sampled later bars without a signal (half
+  evenly spaced, half drawn with a fixed seed), plus the old nine points.
+  This part is complete for the first 4,000 bars and a sample after that;
+  the README says what that covers.
+- Defaults check every signal bar up to 4,000. On the shipped year that is
+  100% of the signal bars of all six examples and 13% of the other bars, in
+  2 to 30 seconds per strategy (the old check took under a second).
+  `perpmath backtest --lookahead signals` never samples signal bars;
+  `--lookahead every-bar` cuts after every bar (half a minute to about nine
+  minutes per strategy on the shipped year). All six examples pass it there.
+- `timing.lookahead_check` in the result file now records the method, the
+  number of signal bars and other bars, how many of each were cut, and the
+  seed when anything was sampled. Keys were added and none changed meaning,
+  so `schema_version` stays 1 (see `docs/output-format.md`).
+- A strategy that raises on a shortened copy now fails the check with a
+  message instead of a traceback. `generate` must accept any number of bars
+  from one upwards.
+- `check_no_lookahead` (fixed cuts) is unchanged and still exported; its
+  docstring now says what it misses. The testnet runner still calls it at
+  start-up.
+
+### Grid look-ahead check
+
+- The grid check had a blind spot of its own: the last bar of each shortened
+  copy was left out of the comparison, so a simulator looking exactly one
+  bar ahead passed at any number of cuts, a cut after every bar included.
+  The simulator has no such look-ahead; the check could not have shown it.
+- `simulate_grid(..., close_at_end=False)` leaves the position open on the
+  last bar. The check uses it to compare every bar of a copy. Results always
+  close at the end, as before.
+- Cuts: every one of the first 500 bars, 40 sampled later bars with a fill,
+  and the nine fixed points (about 550 simulations and 7 seconds on the
+  shipped year, up from 9 and about 1 second). `check_grid_no_lookahead` now
+  returns the `lookahead_check` block instead of a count.
+
+### `liquidity_sweep`
+
+- Rule 4 said "a bar that sweeps both sides gives no signal". What the code
+  does, and has always done: a bar that trades through both the prior high
+  and the prior low gives no signal only if it closes inside the old range.
+  If it closes at or above the prior high it is counted as a sweep of the
+  low and goes long; at or below the prior low, short. On the shipped year
+  15 bars trade through both sides and 10 of them give such a signal (10 of
+  3,374). The behaviour is **not changed**; the docstring and the README now
+  describe it and a test pins it.
+
+### Tests
+
+- Four strategies that cheat by one to five bars (`tests/peekers.py`), the
+  old check's misses kept as regression tests, the new check stopping all
+  four, and the limit of signal-bar cuts shown on two of them.
+- The grid simulator at every cut of a short series for each direction,
+  range-exit mode and path; a one-bar-ahead simulator that the old
+  comparison passes and the new one stops.
+- `liquidity_sweep` on hand-made bars that trade through both sides.
+
 ## 0.2.1 (2026-11-22)
 
 Three more example strategies. Nothing else changes: the engine's timing and

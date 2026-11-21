@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
+from bisect import bisect_left
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -18,8 +20,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from . import __version__
-from .backtest import (DAY_MS, SCHEMA_VERSION, ConfigError, LookaheadError, _equity_points, _num,
-                       _split_time, write_result)
+from .backtest import (DAY_MS, LOOKAHEAD_SEED, SCHEMA_VERSION, ConfigError, LookaheadError, _equity_points,
+                       _fixed_cuts, _num, _pct, _split_time, _spread, write_result)
 from .data import (BYBIT_KLINE_URL, CATEGORY, Bars, DataError, cache_path, count_missing_bars,
                    file_sha256, interval_ms, iso_utc, load_bars, parse_date_ms)
 from .funding import (BYBIT_FUNDING_URL, FundingRates, check_coverage, download_funding,
@@ -138,34 +140,82 @@ def _grid_config(params: Dict[str, Any], execution: Dict[str, Any], lower: float
 # Look-ahead check
 # --------------------------------------------------------------------------- #
 
+GRID_LOOKAHEAD_LEADING_BARS = 500   # a cut after every one of the first this-many bars
+GRID_LOOKAHEAD_FILL_CUTS = 40       # cuts after later bars on which the full run has a fill
+
+
 def check_grid_no_lookahead(bars: Bars, config: GridConfig, funding: Optional[FundingRates],
-                            step_ms: int, cuts: int = 8) -> int:
-    """Prove the simulator never uses a bar before it happens.
+                            step_ms: int, cuts: int = 8,
+                            leading_bars: Optional[int] = GRID_LOOKAHEAD_LEADING_BARS,
+                            fill_cuts: Optional[int] = GRID_LOOKAHEAD_FILL_CUTS,
+                            seed: int = LOOKAHEAD_SEED) -> Dict[str, Any]:
+    """Check that the simulator gives the same fills and equity when later bars are not there.
 
     The grid is simulated on the full data and again on shortened copies.
-    Every fill and every equity value before the last bar of a shortened
-    copy must be identical (the last bar differs only because open
-    positions are closed there). Returns the number of shortened runs.
+    Every fill and every equity value of a shortened copy must be identical
+    to the full run's, the copy's last bar included. The copies are simulated
+    without the end-of-sample close for that reason: with it the last bar
+    could not be compared, and a simulator that looks exactly one bar ahead
+    would pass at every cut (the bar it looks at is still in the copy for
+    every bar that is compared).
+
+    Where the data is cut: after every one of the first ``leading_bars`` bars;
+    after ``fill_cuts`` of the later bars on which the full run has a fill,
+    half evenly spaced and half drawn with a fixed seed; and at ``cuts``
+    evenly spaced points plus one that drops only the last bar. ``None`` for
+    ``fill_cuts`` takes every bar with a fill, ``None`` for ``leading_bars``
+    every bar. One simulation per cut, so the defaults are a sample: a
+    one-bar look-ahead that acts on most bars is found at once, one that acts
+    on a few bars can be missed. The tests run the complete version on short
+    series.
 
     This checks the simulator with fixed bounds. It cannot tell whether the
     bounds themselves were chosen with hindsight; ``in_sample_range`` is, for
     the in-sample period, and the result says so.
+
+    Returns the ``lookahead_check`` block of the grid result document.
     """
     n = len(bars)
     full = simulate_grid(bars, config, 0, n, funding, step_ms)
-    points = sorted({n * j // (cuts + 1) for j in range(1, cuts + 1)} | {n - 1})
-    points = [k for k in points if 1 < k < n]
-    for k in points:
-        part = simulate_grid(bars.head(k), config, 0, k, funding, step_ms)
-        settled = k - 1
-        diff = np.flatnonzero(part.equity[:settled] != full.equity[:settled])
+    testable = max(n - 1, 0)                   # nothing comes after the last bar
+    event_bars = [event[0] for event in full.events]
+    filled = np.zeros(testable, dtype=bool)
+    filled[[i for i in event_bars if i < testable]] = True
+    leading = testable if leading_bars is None else min(leading_bars, testable)
+    later = np.arange(testable) >= leading
+
+    chosen = ~later
+    chosen[_spread(np.flatnonzero(filled & later), fill_cuts, random.Random(seed))] = True
+    chosen[[k - 1 for k in _fixed_cuts(n, cuts)]] = True
+
+    for i in np.flatnonzero(chosen).tolist():
+        k = i + 1
+        part = simulate_grid(bars.head(k), config, 0, k, funding, step_ms, close_at_end=False)
+        diff = np.flatnonzero(part.equity != full.equity[:k])
         if len(diff):
-            raise LookaheadError(f"grid equity at bar {int(diff[0])} changes when bars after bar {k - 1} "
+            raise LookaheadError(f"grid equity at bar {int(diff[0])} changes when bars after bar {i} "
                                  f"are removed: the simulator uses future data")
-        if [e for e in part.events if e[0] < settled] != [e for e in full.events if e[0] < settled]:
-            raise LookaheadError(f"grid fills before bar {settled} change when bars after bar {k - 1} "
+        if part.events != full.events[:bisect_left(event_bars, k)]:
+            raise LookaheadError(f"grid fills up to bar {i} change when bars after bar {i} "
                                  f"are removed: the simulator uses future data")
-    return len(points)
+
+    fill_bars = int(np.count_nonzero(filled))
+    fills_checked = int(np.count_nonzero(chosen & filled))
+    others_checked = int(np.count_nonzero(chosen & ~filled))
+    sampled = fills_checked < fill_bars or others_checked < testable - fill_bars
+    return {
+        "passed": True,
+        "method": "fill_cuts",
+        "shortened_runs": fills_checked + others_checked,
+        "fill_bars": fill_bars,
+        "fill_bars_checked": fills_checked,
+        "fill_bars_checked_pct": _pct(fills_checked, fill_bars),
+        "other_bars": testable - fill_bars,
+        "other_bars_checked": others_checked,
+        "other_bars_checked_pct": _pct(others_checked, testable - fill_bars),
+        "leading_bars_all_checked": leading,
+        "sample_seed": seed if sampled else None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -357,7 +407,7 @@ def run_grid_backtest(bars: Bars, config: Dict[str, Any], symbol: str, interval:
     if funding is not None:
         funding_records = check_coverage(funding, int(bars.ts[0]), int(bars.ts[-1]) + step)
 
-    lookahead_runs = check_grid_no_lookahead(bars, grid_config, funding, step, lookahead_cuts)
+    lookahead_check = check_grid_no_lookahead(bars, grid_config, funding, step, lookahead_cuts)
     windows = {"in_sample": (0, split_index), "out_of_sample": (split_index, len(bars))}
     blocks = {label: _segment(bars, grid_config, funding, s, e, step) for label, (s, e) in windows.items()}
     comparisons = _comparisons(bars, grid_config, funding, windows, step)
@@ -436,7 +486,7 @@ def run_grid_backtest(bars: Bars, config: Dict[str, Any], symbol: str, interval:
             "grid_start": "open of the first bar of each sample",
             "grid_orders": "fill when price trades strictly through the level, at the level",
             "intrabar_path": grid_config.intrabar_path,
-            "lookahead_check": {"passed": True, "shortened_runs": lookahead_runs},
+            "lookahead_check": lookahead_check,
         },
         "assumptions": _assumptions(grid_config, params["bounds"], funding is not None),
         "grid": {

@@ -23,7 +23,7 @@ New keys may be added without a version change.
 | `config` | object | The config actually used, defaults filled in: `strategy`, `params`, `execution`, `split` |
 | `data` | object | See below |
 | `costs` | object | `fee_rate_per_side` and `slippage_per_fill` as fractions (0.00055 = 0.055%); `funding_modelled` is always `false` in 0.1 |
-| `timing` | object | `signal`, `fill`, `same_bar_stop_and_target` describe the engine's rules; `lookahead_check` is `{"passed": true, "shortened_runs": N}` |
+| `timing` | object | `signal`, `fill`, `same_bar_stop_and_target` describe the engine's rules; `lookahead_check` says what the look-ahead check did, see below |
 | `split` | object | `oos_start`: open time of the first out-of-sample bar |
 | `in_sample` | object | Sample block, see below |
 | `out_of_sample` | object | Sample block, see below |
@@ -39,6 +39,47 @@ New keys may be added without a version change.
 | `bars` | Number of bars used |
 | `missing_bars` | Bars absent between the first and last bar |
 | `file`, `file_sha256` | Name and SHA-256 of the cached CSV, to confirm two runs used the same data |
+
+## `timing.lookahead_check`
+
+What the check did before the simulation: the strategy was run again on
+copies of the data that stop right after a bar, and every decision on the
+bars of each copy had to equal the full run's. A file is only written when
+the check passed. What a pass does and does not establish is in the README
+under "How results are computed".
+
+A *signal bar* is a bar on which the full run decided something (entry side,
+stop, target or an exit flag). The last bar of the data is counted in neither
+group: nothing comes after it, and the engine never fills its signal.
+
+| Key | Meaning |
+|---|---|
+| `passed` | Always `true` |
+| `method` | `"signal_cuts"`: the cuts were placed after signal bars first (0.2.2 on). Absent in files written by 0.2.1 and earlier, which cut at nine fixed points only |
+| `shortened_runs` | Number of shortened copies the strategy was run on: `signal_bars_checked` + `other_bars_checked` |
+| `signal_bars` | Signal bars in the data |
+| `signal_bars_checked` | Signal bars that a copy stopped right after |
+| `signal_bars_checked_pct` | `signal_bars_checked / signal_bars x 100`; `null` when there is no signal bar |
+| `signal_bars_sampled` | `true` when not every signal bar was checked (more than 4,000 of them in the default mode) |
+| `other_bars` | Bars without a signal |
+| `other_bars_checked` | Bars without a signal that a copy stopped right after |
+| `other_bars_checked_pct` | `other_bars_checked / other_bars x 100`; `null` when there is none |
+| `other_bars_sampled` | `true` when not every such bar was checked |
+| `leading_bars_all_checked` | A copy stopped after every one of the first this-many bars, signal or not |
+| `sample_seed` | Seed of the random half of the sampled cuts; `null` when nothing was sampled. The cuts are the same on every run |
+
+Modes (`--lookahead`): `default` checks at most 4,000 signal bars, every one
+of the first 4,000 bars and 500 of the later bars without a signal, plus nine
+fixed points; `signals` checks every signal bar however many there are;
+`every-bar` stops a copy after every bar, so both `_sampled` flags are
+`false` and `leading_bars_all_checked` is the number of bars minus one.
+
+Versioning: 0.2.2 added every key except `passed` and `shortened_runs`.
+Those two keep their meaning (`shortened_runs` is still the number of
+shortened copies compared; it is larger because more copies are made), so
+`schema_version` stays `1` under the rule above. A reader that wants to know
+how strong the check behind a file was should look at `method`: without it
+the file comes from the nine-point check.
 
 ## Sample block (`in_sample`, `out_of_sample`)
 
@@ -110,7 +151,7 @@ times, identical on a re-run except `generated_at`) but has its own layout.
 | `config` | object | The config used, defaults filled in: `strategy`, `params`, `execution`, `split` |
 | `data` | object | As above, plus `funding`: `source`, `records_in_range`, `first`, `last`, `file`, `file_sha256` of the funding CSV, or `null` when funding is off |
 | `costs` | object | `grid_fee_rate` (grid limit fills), `taker_fee_rate` (market orders), `fee_source`, `slippage_per_fill`, `round_trip_cost_pct` (2 x (grid fee + slippage), in percent), `funding_modelled`, `maintenance_margin_rate`, `maintenance_margin_source` |
-| `timing` | object | `grid_start`, `grid_orders` (fill rule), `intrabar_path`, `lookahead_check` `{"passed": true, "shortened_runs": N}` |
+| `timing` | object | `grid_start`, `grid_orders` (fill rule), `intrabar_path`, `lookahead_check` (see below) |
 | `assumptions` | array of strings | Every modelling assumption of this run, in words |
 | `grid` | object | See below |
 | `split` | object | `oos_start` |
@@ -118,6 +159,25 @@ times, identical on a re-run except `generated_at`) but has its own layout.
 | `comparisons` | object | The same run with one thing changed, see below |
 | `warnings` | array of strings | Hindsight bounds, missing bars, liquidation, start outside the range, cells narrower than the round-trip cost, fewer than 100 round trips |
 | `disclaimer` | string | Fixed text; says so when funding is not modelled |
+
+## Grid `timing.lookahead_check`
+
+The grid was simulated again on copies of the data that stop right after a
+bar; every fill and equity value of a copy, its last bar included, had to
+equal the full run's. A *fill bar* is a bar on which the full run has at
+least one fill or other event. The last bar of the data is in neither group.
+
+| Key | Meaning |
+|---|---|
+| `passed` | Always `true` |
+| `method` | `"fill_cuts"` (0.2.2 on). Absent in files written by 0.2.1 and earlier, whose check used nine fixed points and did not compare the last bar of a copy |
+| `shortened_runs` | Number of shortened copies simulated: `fill_bars_checked` + `other_bars_checked` |
+| `fill_bars`, `fill_bars_checked`, `fill_bars_checked_pct` | Fill bars in the data, and how many a copy stopped right after |
+| `other_bars`, `other_bars_checked`, `other_bars_checked_pct` | The same for bars without a fill |
+| `leading_bars_all_checked` | A copy stopped after every one of the first this-many bars (500 by default) |
+| `sample_seed` | Seed of the random half of the sampled fill bars; `null` when every bar was cut |
+
+As for strategies, the added keys do not change `schema_version`.
 
 ## `grid`
 

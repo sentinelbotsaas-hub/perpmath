@@ -73,12 +73,18 @@ Candles are cached in `data/` (ignored by git). Both commands exit with a
 non-zero code if the data is empty or malformed, the config is invalid, or
 the look-ahead check fails.
 
+`backtest` spends most of its time in that check: it runs the strategy
+several thousand times on shortened data, which takes seconds to tens of
+seconds on a year of 15-minute bars. `--lookahead every-bar` asks for the
+complete version (minutes). What the check does and does not establish is
+under [How results are computed](#how-results-are-computed).
+
 ## Example strategies
 
 | Name | What it does | Rules |
 |---|---|---|
 | `fvg` | Enters on the first return into a three-candle fair value gap, stop beyond the gap, target at 2R | [fvg.py](src/perpmath/strategies/fvg.py) |
-| `liquidity_sweep` | Fades a bar that takes out the prior 20-bar high or low and closes back inside, target at 2R | [liquidity_sweep.py](src/perpmath/strategies/liquidity_sweep.py) |
+| `liquidity_sweep` | Fades a bar that takes out the prior 20-bar high or low and closes back inside, target at 2R. A bar that takes out both gives no signal if it closes inside the old range; if it closes beyond one side it is traded as a sweep of the other side, in the direction of its close (rule 4) | [liquidity_sweep.py](src/perpmath/strategies/liquidity_sweep.py) |
 | `ma_cross` | 20/50 simple moving-average cross with an ATR stop; the boring baseline | [ma_cross.py](src/perpmath/strategies/ma_cross.py) |
 | `order_block` | Enters on the first return to the last opposite candle before a three-bar, 2 x ATR move that closed beyond the latest swing point; stop beyond the candle, target at 2R | [order_block.py](src/perpmath/strategies/order_block.py) |
 | `break_of_structure` | Follows a close beyond the latest confirmed swing high or low (5 bars either side), stop beyond the opposite swing, target at 2R | [break_of_structure.py](src/perpmath/strategies/break_of_structure.py) |
@@ -89,6 +95,16 @@ The exact rules are in each file's docstring. Parameters live in
 have not been adjusted since. Fair value gaps and liquidity sweeps have no
 agreed standard parameters, so these are one reasonable choice, not the
 definition. There is no optimizer in 0.1.
+
+One `liquidity_sweep` rule does something its one-line summary does not
+suggest. A bar that trades through both the prior high and the prior low and
+then closes *outside* the old range (not back inside it) still gives a
+signal: a close at or above the prior high is counted as a sweep of the low
+and goes long, a close at or below the prior low is counted as a sweep of
+the high and goes short. That follows from rules 2 and 3 as they are written
+and is what the shipped results contain (10 of the 3,374 entry signals in
+the shipped year). It is spelled out in rule 4 of the module and pinned by a
+test; it has not been changed, because that would change published numbers.
 
 Order blocks, breaks of structure and breaker blocks are looser still: they
 are taught from chart examples, and two teachers will mark the same chart
@@ -194,11 +210,76 @@ hand you have a period you did not look at.
 
 Values that cannot be computed are `null`, never 0.
 
-**Look-ahead check.** Before simulating, the strategy is run again on
-shortened copies of the data. If any decision on a bar changes when later
-bars are removed, the run stops with an error. This catches a strategy that
-reads future bars from the data it is given. It cannot catch a strategy that
-gets future prices from somewhere else, such as a file or a global variable.
+**Look-ahead check.** Before simulating, the strategy is run once on the full
+data and then again on copies of the data that stop early. A *signal bar* is
+a bar on which the full run decided something: an entry, a stop, a target or
+an exit flag. The copies stop
+
+- right after every signal bar (all of them up to 4,000; above that a subset,
+  half evenly spaced and half drawn with a fixed seed);
+- right after every one of the first 4,000 bars, signal or not;
+- right after 500 of the later bars that have no signal, chosen the same
+  way, and at nine fixed points spread over the data.
+
+Every copy starts at the first bar, so indicators see the history they would
+have seen. The decisions of a copy must equal the full run's on every bar the
+copy contains. The first difference stops the run with an error that names
+the bar.
+
+What a passed check establishes: on every signal bar that was checked, the
+decision in the result (side, stop, target, exit flags) is the decision the
+strategy makes when no later bar exists. A strategy that makes its decisions
+one bar early (acting on bar `i` with what is only known on bar `i + 1`)
+fails at its first signal bar: the bar it needs is not in the copy.
+
+What it does not establish:
+
+- **Signals that later bars removed.** Look-ahead can also be used to *drop*
+  a decision: skip the entries the next bar goes against, or treat a swing
+  point as known before it is confirmed (the tests do this to `order_block`,
+  and every entry it still gives holds up). The signals that remain pass;
+  the trace is on bars that have no signal. Those bars are all cut in the
+  first 4,000 bars and sampled after that (about 500 of 30,000 on a year of
+  15-minute bars), so on that year roughly 13% of them are cut. A look-ahead
+  of this kind that changes many bars is found; one that changes a few can
+  be missed. As a guide, if the bars it changes were spread evenly, one
+  changing 20 bars would get through about 6 times in 100 and one changing
+  50 about once in 1,000. `--lookahead every-bar` cuts after every bar and
+  leaves no such gap, at one strategy run per bar.
+- **Signal bars that were not checked.** Above 4,000 signal bars the default
+  checks a subset. `--lookahead signals` checks all of them.
+- **Data from outside.** The check controls the bars it hands to the
+  strategy and nothing else. A strategy that takes later prices from a file,
+  a global variable or a closure gives the same answers on every copy and
+  passes.
+- **Hindsight in the design.** Rules or parameters chosen after looking at
+  the results are not something a shortened copy can show.
+- **The signal on the last bar.** Nothing comes after it, so it is not
+  checked. The engine never fills it either.
+
+The check needs a strategy that gives the same output for the same input and
+runs on any number of bars from one upwards; one that raises on a short copy
+fails.
+
+The result file records what was done (`timing.lookahead_check`): how many
+signal bars and other bars there were, how many of each were cut, and the
+seed if anything was sampled. On the shipped year (35,040 bars) every signal
+bar of every example is checked, in about 4,900 to 7,500 runs per strategy.
+Measured on one desktop PC:
+
+| | Signal bars | default | `--lookahead every-bar` |
+|---|---:|---:|---:|
+| fvg | 1,592 | 30 s | about 7 min |
+| liquidity_sweep | 3,374 | 8 s | about 1 min |
+| ma_cross | 835 | 2 s | about 30 s |
+| order_block | 530 | 21 s | about 7 min |
+| break_of_structure | 1,631 | 18 s | about 4 min |
+| breaker_block | 384 | 23 s | about 9 min |
+
+All six pass both. Up to 0.2.1 the check cut the data at nine fixed points
+only. That found look-ahead reaching far ahead; look-ahead of one or a few
+bars was found or missed depending on where the cuts fell. Result files
+written by those versions say `"shortened_runs": 9` and nothing more.
 
 ## What is not modelled
 
@@ -412,10 +493,30 @@ maintenance margin rate. Unknown keys are errors.
 ### Look-ahead check for grids
 
 Before the results are computed, the grid is simulated on the full data and
-on shortened copies, as for strategies; every fill and equity value before the
-cut must be identical. This shows the simulator does not read later bars. It
-cannot show that the *bounds* were chosen without hindsight, which is why
-`in_sample_range` is flagged.
+on shortened copies. Every fill and every equity value of a copy must equal
+the full run's, the copy's last bar included; the copies are simulated
+without the end-of-sample close so that this bar can be compared. The copies
+stop after each of the first 500 bars, after 40 of the later bars on which
+the full run has a fill (half evenly spaced, half drawn with a fixed seed)
+and at nine fixed points: about 550 simulations on the shipped year, about
+7 seconds on the same PC.
+
+This is a spot check of the simulator on your data, not a proof. On the
+shipped year it cuts after about 6% of the bars that have a fill. A
+simulator that looked ahead on most bars would be stopped at once; one that
+did so on a few bars could get through. The complete version, a cut after
+every bar, runs in the test suite on short synthetic series for each
+direction, range-exit mode and path.
+
+Up to 0.2.1 the last bar of each copy was left out of the comparison,
+because the position is closed there. That made the check blind to a
+simulator looking exactly one bar ahead, at any number of cuts: the bar it
+looked at was always still in the copy. The simulator had no such
+look-ahead; the check could not have shown it. This is fixed and has a
+regression test.
+
+The check cannot show that the *bounds* were chosen without hindsight, which
+is why `in_sample_range` is flagged.
 
 ### Grid limits
 
@@ -562,6 +663,11 @@ entry side, a stop price, an optional target in R, and optional exit flags.
 Use only that bar and earlier bars. Add the module to `STRATEGIES` in
 `src/perpmath/strategies/__init__.py`.
 
+The look-ahead check calls `generate` thousands of times on the first `k`
+bars of the data, for many values of `k` down to 1. It must return the same
+output for the same input and must not raise when there is too little
+history; give no signal there instead.
+
 ## Tests
 
 ```bash
@@ -569,8 +675,12 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The tests cover look-ahead, fee and slippage arithmetic, metrics on a
-hand-computed example, each strategy's rules on hand-made bars (entry, no
+The tests cover look-ahead (including four strategies that cheat by one to
+five bars: the old fixed-cut check lets two of them through on the test
+series and the current check stops all four, and a test shows which of them
+the cuts after signal bars cannot see on their own), fee and slippage
+arithmetic, metrics on a hand-computed example, each strategy's rules on
+hand-made bars (entry, no
 entry, stop, target, expiry and failure of a zone), swing points not being
 used before the bars to their right have closed (by hand, and by cutting a
 synthetic series at every bar and comparing the decisions), the

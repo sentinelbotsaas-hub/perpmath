@@ -6,7 +6,7 @@ run the same strategies on the Bybit testnet only; it never connects to mainnet.
 
 __version__ = "0.2.1"
 
-from .backtest import LookaheadError, check_no_lookahead, run_backtest
+from .backtest import LookaheadError, check_lookahead_at_signals, check_no_lookahead, run_backtest
 from .data import Bars, DataError, load_bars
 from .engine import ExecutionConfig, Signals, simulate
 from .metrics import compute_metrics
@@ -18,6 +18,7 @@ __all__ = [
     "ExecutionConfig",
     "LookaheadError",
     "Signals",
+    "check_lookahead_at_signals",
     "check_no_lookahead",
     "compute_metrics",
     "load_bars",

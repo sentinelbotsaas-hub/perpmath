@@ -12,7 +12,7 @@ from perpmath import __version__
 from perpmath import grid_backtest as gb
 from perpmath.backtest import ConfigError, LookaheadError, to_json
 from perpmath.cli import main
-from perpmath.data import DataError, write_csv
+from perpmath.data import Bars, DataError, write_csv
 from perpmath.funding import FundingRates, write_funding_csv
 from perpmath.grid import GridConfig, simulate_grid
 
@@ -104,15 +104,46 @@ def test_simulator_passes_the_lookahead_check(walk_and_funding):
     bars, funding = walk_and_funding
     config = GridConfig(lower=float(bars.low.min()), upper=float(bars.high.max()), grid_count=40,
                         out_of_range="close", leverage=5)
-    assert gb.check_grid_no_lookahead(bars, config, funding, STEP) == 9
+    report = gb.check_grid_no_lookahead(bars, config, funding, STEP)
+    assert list(report) == ["passed", "method", "shortened_runs", "fill_bars", "fill_bars_checked",
+                            "fill_bars_checked_pct", "other_bars", "other_bars_checked", "other_bars_checked_pct",
+                            "leading_bars_all_checked", "sample_seed"]
+    assert report["passed"] is True and report["method"] == "fill_cuts"
+    assert report["leading_bars_all_checked"] == gb.GRID_LOOKAHEAD_LEADING_BARS == 500
+    assert report["fill_bars"] + report["other_bars"] == len(bars) - 1          # the last bar cannot be tested
+    assert report["shortened_runs"] == report["fill_bars_checked"] + report["other_bars_checked"]
+    assert 500 + gb.GRID_LOOKAHEAD_FILL_CUTS <= report["shortened_runs"] <= 500 + gb.GRID_LOOKAHEAD_FILL_CUTS + 9
+    assert report["fill_bars_checked"] < report["fill_bars"] and report["sample_seed"] is not None
+    assert report == gb.check_grid_no_lookahead(bars, config, funding, STEP)    # same cuts on every run
+
+
+@pytest.mark.parametrize("options", [
+    dict(),
+    dict(direction="long", leverage=3),
+    dict(direction="short", out_of_range="stop"),
+    dict(out_of_range="close", leverage=5),
+    dict(intrabar_path="low_first", spacing="arithmetic"),
+    dict(intrabar_path="best_of_two"),
+])
+def test_simulator_gives_the_same_fills_and_equity_at_every_cut_of_a_short_series(options, walk_and_funding):
+    """The complete version of the check: a cut after every bar, nothing sampled."""
+    bars, funding = walk_and_funding
+    bars = bars.head(500)
+    # The series drifts down: a lower bound above its low makes it leave the range after it has traded.
+    config = GridConfig(lower=float(bars.low.min()) * 1.05, upper=float(bars.high.max()),
+                        grid_count=20, **options)
+    report = gb.check_grid_no_lookahead(bars, config, funding, STEP, leading_bars=None)
+    assert report["shortened_runs"] == 499 and report["sample_seed"] is None
+    assert report["fill_bars_checked"] == report["fill_bars"] > 10
+    assert report["other_bars_checked"] == report["other_bars"]
 
 
 def test_a_simulator_that_reads_the_last_bar_fails_the_check(walk_and_funding, monkeypatch):
     bars, funding = walk_and_funding
     real = gb.simulate_grid
 
-    def peeking(b, config, start, end, fund, step):
-        result = real(b, config, start, end, fund, step)
+    def peeking(b, config, start, end, fund, step, **options):
+        result = real(b, config, start, end, fund, step, **options)
         result.equity = result.equity + float(b.close[-1])     # depends on the last bar given
         return result
 
@@ -120,6 +151,65 @@ def test_a_simulator_that_reads_the_last_bar_fails_the_check(walk_and_funding, m
     config = GridConfig(lower=float(bars.low.min()), upper=float(bars.high.max()))
     with pytest.raises(LookaheadError, match="future data"):
         gb.check_grid_no_lookahead(bars, config, funding, STEP)
+
+
+def comparison_made_up_to_0_2_1(bars, config, funding, cuts):
+    """The old check: fixed cuts, each copy closed at its end, and its last bar therefore left out.
+
+    Returns the first cut at which it sees a difference, or None when it sees none.
+    """
+    n = len(bars)
+    full = gb.simulate_grid(bars, config, 0, n, funding, STEP)
+    points = sorted({n * j // (cuts + 1) for j in range(1, cuts + 1)} | {n - 1})
+    for k in [k for k in points if 1 < k < n]:
+        part = gb.simulate_grid(bars.head(k), config, 0, k, funding, STEP)
+        settled = k - 1
+        if not np.array_equal(part.equity[:settled], full.equity[:settled]):
+            return k
+        if [e for e in part.events if e[0] < settled] != [e for e in full.events if e[0] < settled]:
+            return k
+    return None
+
+
+def one_bar_ahead(real):
+    """A simulator that works every bar with the NEXT bar's prices: look-ahead of exactly one bar."""
+    def simulate(bars, config, start, end, funding, step, **options):
+        def following(values):
+            return np.append(values[1:], values[-1:])
+        shifted = Bars(bars.ts, following(bars.open), following(bars.high), following(bars.low),
+                       following(bars.close), bars.volume)
+        return real(shifted, config, start, end, funding, step, **options)
+    return simulate
+
+
+def test_one_bar_look_ahead_passed_the_old_comparison_at_every_cut_and_fails_now(walk_and_funding, monkeypatch):
+    """Regression test for the blind spot: in the old comparison the bar looked at was always still there."""
+    bars, funding = walk_and_funding
+    config = GridConfig(lower=float(bars.low.min()), upper=float(bars.high.max()), grid_count=30)
+    monkeypatch.setattr(gb, "simulate_grid", one_bar_ahead(gb.simulate_grid))
+    assert comparison_made_up_to_0_2_1(bars, config, funding, cuts=8) is None
+    short = bars.head(400)
+    assert comparison_made_up_to_0_2_1(short, config, funding, cuts=398) is None      # a cut after every bar
+    with pytest.raises(LookaheadError, match="future data"):
+        gb.check_grid_no_lookahead(bars, config, funding, STEP)
+    with pytest.raises(LookaheadError, match="future data"):                           # fill and fixed cuts alone
+        gb.check_grid_no_lookahead(bars, config, funding, STEP, leading_bars=0)
+    with pytest.raises(LookaheadError, match="future data"):                           # the nine fixed cuts alone
+        gb.check_grid_no_lookahead(bars, config, funding, STEP, leading_bars=0, fill_cuts=0)
+
+
+def test_without_the_end_close_the_last_bar_ends_as_it_does_in_a_longer_run(walk_and_funding):
+    bars, funding = walk_and_funding
+    config = GridConfig(lower=float(bars.low.min()), upper=float(bars.high.max()), grid_count=30)
+    cut = 1700
+    full = simulate_grid(bars, config, funding=funding, step_ms=STEP)
+    closed = simulate_grid(bars.head(cut), config, funding=funding, step_ms=STEP)
+    left_open = simulate_grid(bars.head(cut), config, funding=funding, step_ms=STEP, close_at_end=False)
+    assert closed.events[-1][1] == "end" and closed.events[:-1] == left_open.events
+    assert left_open.events == [e for e in full.events if e[0] < cut]
+    assert np.array_equal(left_open.equity, full.equity[:cut])
+    assert closed.equity[-1] < left_open.equity[-1]            # the close costs a fee and slippage
+    assert np.array_equal(closed.equity[:-1], left_open.equity[:-1])
 
 
 def test_fills_and_equity_do_not_change_when_future_bars_are_added(walk_and_funding):
@@ -142,7 +232,8 @@ def test_out_of_sample_starts_flat_and_only_trades_after_the_split(walk_and_fund
     assert all(f["time"] >= oos_start for f in doc["out_of_sample"]["fills"])
     assert all(f["time"] < oos_start for f in doc["in_sample"]["fills"])
     assert doc["out_of_sample"]["equity_curve"][0] == {"t": oos_start, "equity": 10000.0}
-    assert doc["timing"]["lookahead_check"] == {"passed": True, "shortened_runs": 9}
+    check = doc["timing"]["lookahead_check"]
+    assert check["passed"] is True and check["method"] == "fill_cuts" and check["shortened_runs"] > 500
 
 
 def test_in_sample_range_bounds_are_flagged_as_hindsight(walk_and_funding):

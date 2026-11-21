@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -32,12 +33,26 @@ class ConfigError(Exception):
 
 
 class LookaheadError(Exception):
-    """A strategy's decisions changed when later bars were removed."""
+    """A strategy's decisions changed when later bars were removed, or it could not run without them."""
 
 
 # --------------------------------------------------------------------------- #
 # Look-ahead check
 # --------------------------------------------------------------------------- #
+
+# Defaults of the check that runs before every backtest (``check_lookahead_at_signals``).
+LOOKAHEAD_SIGNAL_CUTS = 4000   # at most this many cuts after bars that carry a decision
+LOOKAHEAD_LEADING_BARS = 4000  # a cut after every one of the first this-many bars, decision or not
+LOOKAHEAD_OTHER_CUTS = 500     # at most this many cuts after later bars that carry no decision
+LOOKAHEAD_SEED = 20261122      # fixed, so the sampled cuts are the same on every run
+LOOKAHEAD_FIXED_CUTS = 8       # evenly spaced cuts of the older check, always kept
+# mode -> (max_signal_cuts, leading_bars, other_cuts); None = no limit
+LOOKAHEAD_MODES: Dict[str, Tuple[Optional[int], Optional[int], Optional[int]]] = {
+    "default": (LOOKAHEAD_SIGNAL_CUTS, LOOKAHEAD_LEADING_BARS, LOOKAHEAD_OTHER_CUTS),
+    "signals": (None, LOOKAHEAD_LEADING_BARS, LOOKAHEAD_OTHER_CUTS),   # every signal bar, however many
+    "every-bar": (None, None, None),                                   # a cut after every bar: complete, slow
+}
+
 
 def _same(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     if a.dtype.kind == "f":
@@ -45,36 +60,183 @@ def _same(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return a == b
 
 
+def _compare_shortened(generate: Callable[[Bars, dict], Signals], bars: Bars, params: dict,
+                       full: Dict[str, np.ndarray], k: int) -> None:
+    """Run the strategy on the first ``k`` bars only; all ``k`` decisions must equal the full run's."""
+    try:
+        part = generate(bars.head(k), params).fields()
+    except IndexError as exc:
+        raise LookaheadError(f"strategy read past the last bar when given only {k} bars") from exc
+    for name, values in part.items():
+        diff = np.flatnonzero(~_same(values, full[name][:k]))
+        if len(diff):
+            bar = int(diff[0])
+            raise LookaheadError(
+                f"signals.{name} at bar {bar} ({iso_utc(int(bars.ts[bar]))}) changes when bars after "
+                f"bar {k - 1} are removed: the strategy uses future data"
+            )
+
+
+def _fixed_cuts(n: int, cuts: int) -> List[int]:
+    """Bar counts of the evenly spaced shortened copies, plus the one that drops only the last bar."""
+    points = sorted({n * j // (cuts + 1) for j in range(1, cuts + 1)} | {n - 1})
+    return [k for k in points if 0 < k < n]
+
+
 def check_no_lookahead(generate: Callable[[Bars, dict], Signals], bars: Bars,
                        params: dict, cuts: int = 8) -> int:
-    """Prove that decisions do not depend on later bars.
+    """The coarse check: shortened copies at a few fixed points.
 
     The strategy is run on the full data and again on shortened copies that
     end at ``cuts`` evenly spaced points (plus one that drops only the last
     bar). Every decision on a bar that exists in both runs must be identical.
-    A strategy that reads bar ``i + 1`` while deciding bar ``i`` cannot pass:
-    on the shortened copy that bar is not there.
+
+    This finds a strategy whose decisions depend on bars far ahead, or on the
+    whole series (a full-sample normalisation, a centred window). It usually
+    does NOT find one that looks only a bar or a few bars ahead: such a
+    strategy differs from the full run only on the last bars of a shortened
+    copy, and with a handful of fixed cuts those are rarely bars it acts on.
+    ``check_lookahead_at_signals`` puts the cuts where the decisions are and is
+    what ``run_backtest`` uses.
 
     Returns the number of shortened runs compared. Raises ``LookaheadError``
     on the first difference.
     """
+    full = generate(bars, params).fields()
+    points = _fixed_cuts(len(bars), cuts)
+    for k in points:
+        _compare_shortened(generate, bars, params, full, k)
+    return len(points)
+
+
+def decision_bars(fields: Dict[str, np.ndarray]) -> np.ndarray:
+    """True on every bar that carries a decision: an entry, an exit flag, a stop or a target."""
+    return ((np.asarray(fields["side"]) != 0)
+            | np.asarray(fields["exit_long"], dtype=bool) | np.asarray(fields["exit_short"], dtype=bool)
+            | ~np.isnan(fields["stop"]) | ~np.isnan(fields["target_r"]))
+
+
+def _spread(candidates: np.ndarray, limit: Optional[int], rng: random.Random) -> np.ndarray:
+    """At most ``limit`` of ``candidates``: half evenly spaced (first and last included), half at random."""
+    count = len(candidates)
+    if limit is None or count <= limit:
+        return candidates
+    if limit == 0:
+        return candidates[:0]
+    even = np.unique(np.linspace(0, count - 1, (limit + 1) // 2).round().astype(np.int64))
+    taken = np.zeros(count, dtype=bool)
+    taken[even] = True
+    rest = np.flatnonzero(~taken).tolist()
+    # A partial shuffle built on random() alone: Python keeps that sequence
+    # stable for a given seed, so the same bars are drawn on every version.
+    for j in range(limit - len(even)):
+        swap = j + int(rng.random() * (len(rest) - j))
+        rest[j], rest[swap] = rest[swap], rest[j]
+        taken[rest[j]] = True
+    return candidates[taken]
+
+
+def _pct(part: int, whole: int) -> Optional[float]:
+    return round(part / whole * 100, 2) if whole else None
+
+
+def check_lookahead_at_signals(generate: Callable[[Bars, dict], Signals], bars: Bars, params: dict,
+                               max_signal_cuts: Optional[int] = LOOKAHEAD_SIGNAL_CUTS,
+                               leading_bars: Optional[int] = LOOKAHEAD_LEADING_BARS,
+                               other_cuts: Optional[int] = LOOKAHEAD_OTHER_CUTS,
+                               seed: int = LOOKAHEAD_SEED) -> Dict[str, Any]:
+    """Re-run the strategy on data that stops right after a bar, above all the bars where it decided something.
+
+    The strategy is run once on the full data. A *signal bar* is a bar on
+    which that run made any decision (entry side, stop, target or an exit
+    flag). For a signal bar ``i`` the strategy is run again on bars ``0 .. i``
+    only and its decision on bar ``i`` must be the same: side, stop, target and
+    exit flags. The copy always starts at the first bar. Starting later would
+    be cheaper but is not equivalent: an indicator with a long memory gives
+    other values on a shorter history. The earlier bars of each shortened run
+    are compared as well.
+
+    What a cut after a signal bar establishes: the decision the full run made
+    on that bar is the decision the strategy makes when nothing after the bar
+    exists. Any difference stops the run. A strategy that makes its decisions
+    one bar early fails on the first signal checked: the bar it peeked at is
+    not in the copy. ``max_signal_cuts`` caps the number of signal bars checked;
+    above the cap a subset is taken (half evenly spaced, half drawn with a
+    fixed seed) and the report says so. ``None`` checks every signal bar.
+
+    What it cannot establish. Look-ahead that only *removes* decisions leaves
+    signal bars that all hold up: the bars where it acted have no signal in
+    the full run, and would get one if the data stopped there. (Swing points
+    used before they are confirmed do this to ``order_block``.) Only a cut
+    after such a bar shows it, so bars without a signal are cut too:
+
+    * every one of the first ``leading_bars`` bars, signal or not. A cut costs
+      as much as the copy is long, so a complete stretch is cheapest at the
+      start;
+    * ``other_cuts`` of the later bars without a signal, chosen like the
+      signal subset, plus the fixed points of ``check_no_lookahead``.
+
+    Outside the leading stretch this part is a sample. It finds look-ahead
+    that changes many bars and can miss look-ahead that changes a few.
+    ``leading_bars=None`` cuts after every bar: nothing is sampled, and the
+    cost is one ``generate`` call per bar.
+
+    The last bar belongs to neither group: there is nothing after it to
+    remove, and the engine never fills a signal from it.
+
+    Returns the ``lookahead_check`` block of the result document. Raises
+    ``LookaheadError`` on the first difference, and when the strategy cannot
+    be run on a shortened copy at all.
+    """
+    for name, value in (("max_signal_cuts", max_signal_cuts), ("leading_bars", leading_bars),
+                        ("other_cuts", other_cuts)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"{name} must be a whole number >= 0 or None, got {value!r}")
     n = len(bars)
     full = generate(bars, params).fields()
-    points = sorted({n * j // (cuts + 1) for j in range(1, cuts + 1)} | {n - 1})
-    points = [k for k in points if 0 < k < n]
-    for k in points:
+    testable = max(n - 1, 0)                           # the last bar cannot be tested
+    decided = decision_bars(full)[:testable]
+    leading = testable if leading_bars is None else min(leading_bars, testable)
+    later = np.arange(testable) >= leading
+    signal_index = np.flatnonzero(decided)
+    later_others = np.flatnonzero(~decided & later)
+
+    rng = random.Random(seed)
+    chosen = ~later                                    # the leading stretch, complete
+    chosen[_spread(signal_index, max_signal_cuts, rng)] = True
+    chosen[_spread(later_others, other_cuts, rng)] = True
+    chosen[[k - 1 for k in _fixed_cuts(n, LOOKAHEAD_FIXED_CUTS)]] = True
+
+    for i in np.flatnonzero(chosen).tolist():
         try:
-            part = generate(bars.head(k), params).fields()
-        except IndexError as exc:
-            raise LookaheadError(f"strategy read past the last bar when given only {k} bars") from exc
-        for name, values in part.items():
-            diff = np.flatnonzero(~_same(values, full[name][:k]))
-            if len(diff):
-                raise LookaheadError(
-                    f"signals.{name} at bar {int(diff[0])} changes when bars after "
-                    f"bar {k - 1} are removed: the strategy uses future data"
-                )
-    return len(points)
+            _compare_shortened(generate, bars, params, full, i + 1)
+        except LookaheadError:
+            raise
+        except Exception as exc:
+            raise LookaheadError(
+                f"strategy failed when given only the first {i + 1} bars ({type(exc).__name__}: {exc}); "
+                f"the look-ahead check needs it to run on any prefix of the data"
+            ) from exc
+
+    signal_bars, other_bars = len(signal_index), testable - len(signal_index)
+    signals_checked = int(np.count_nonzero(chosen & decided))
+    others_checked = int(np.count_nonzero(chosen & ~decided))
+    sampled = signals_checked < signal_bars or others_checked < other_bars
+    return {
+        "passed": True,
+        "method": "signal_cuts",
+        "shortened_runs": signals_checked + others_checked,
+        "signal_bars": signal_bars,
+        "signal_bars_checked": signals_checked,
+        "signal_bars_checked_pct": _pct(signals_checked, signal_bars),
+        "signal_bars_sampled": signals_checked < signal_bars,
+        "other_bars": other_bars,
+        "other_bars_checked": others_checked,
+        "other_bars_checked_pct": _pct(others_checked, other_bars),
+        "other_bars_sampled": others_checked < other_bars,
+        "leading_bars_all_checked": leading,
+        "sample_seed": seed if sampled else None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -192,23 +354,31 @@ def _segment(bars: Bars, signals: Signals, execution: ExecutionConfig,
 
 def run_backtest(strategy: str, bars: Bars, config: Dict[str, Any], symbol: str, interval: str,
                  data_file: Optional[Dict[str, Any]] = None,
-                 now: Optional[datetime] = None) -> Dict[str, Any]:
+                 now: Optional[datetime] = None,
+                 lookahead: str = "default") -> Dict[str, Any]:
     """Check the strategy for look-ahead, simulate both samples, return the result document.
 
     ``config`` must come from ``load_config`` or ``normalize_config``.
+    ``lookahead`` is one of ``LOOKAHEAD_MODES``: ``"default"`` (every signal
+    bar up to ``LOOKAHEAD_SIGNAL_CUTS``, every one of the first
+    ``LOOKAHEAD_LEADING_BARS`` bars, a sample of the other bars),
+    ``"signals"`` (every signal bar, however many) or ``"every-bar"``.
     """
     step = interval_ms(interval)
     module = STRATEGIES[strategy]
     params = config["params"]
     execution = ExecutionConfig(**config["execution"])
+    if lookahead not in LOOKAHEAD_MODES:
+        raise ConfigError(f"lookahead must be one of {', '.join(LOOKAHEAD_MODES)}, got {lookahead!r}")
 
-    lookahead_runs = check_no_lookahead(module.generate, bars, params)
-    signals = module.generate(bars, params)
-
+    # The split is validated first: the check below can take a while.
     oos_start_ms = _split_time(bars, step, config["split"])
     split_index = int(np.searchsorted(bars.ts, oos_start_ms))
     if split_index < 2 or len(bars) - split_index < 2:
         raise ConfigError(f"split at {iso_utc(oos_start_ms)} leaves an empty in-sample or out-of-sample period")
+
+    lookahead_check = check_lookahead_at_signals(module.generate, bars, params, *LOOKAHEAD_MODES[lookahead])
+    signals = module.generate(bars, params)
 
     in_sample = _segment(bars, signals, execution, 0, split_index, step)
     out_of_sample = _segment(bars, signals, execution, split_index, len(bars), step)
@@ -251,7 +421,7 @@ def run_backtest(strategy: str, bars: Bars, config: Dict[str, Any], symbol: str,
             "signal": "bar close",
             "fill": "next bar open",
             "same_bar_stop_and_target": "stop first",
-            "lookahead_check": {"passed": True, "shortened_runs": lookahead_runs},
+            "lookahead_check": lookahead_check,
         },
         "split": {"oos_start": iso_utc(oos_start_ms)},
         "in_sample": in_sample,

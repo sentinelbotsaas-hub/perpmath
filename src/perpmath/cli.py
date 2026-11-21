@@ -16,7 +16,8 @@ import time
 from typing import List, Optional
 
 from . import __version__
-from .backtest import ConfigError, LookaheadError, load_config, run_backtest, write_result
+from .backtest import (LOOKAHEAD_LEADING_BARS, LOOKAHEAD_MODES, LOOKAHEAD_OTHER_CUTS, LOOKAHEAD_SIGNAL_CUTS,
+                       ConfigError, LookaheadError, load_config, run_backtest, write_result)
 from .data import (INTERVALS, DataError, cache_path, download, file_sha256, interval_ms, iso_utc,
                    load_bars, parse_date_ms)
 from .grid_backtest import add_grid_commands
@@ -53,9 +54,12 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
         parse_date_ms(args.start) if args.start else None,
         parse_date_ms(args.end) if args.end else None,
     )
+    print(f"look-ahead check ({args.lookahead}): re-running the strategy on shortened data, "
+          f"this can take a while ...", file=sys.stderr)
     document = run_backtest(
         args.strategy, bars, config, args.symbol, args.interval,
         data_file={"file": path.name, "file_sha256": file_sha256(path)},
+        lookahead=args.lookahead,
     )
     write_result(args.out, document)
 
@@ -63,6 +67,10 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
           f"{document['data']['first_bar']} to {document['data']['last_bar']}")
     print(f"fee {config['execution']['fee_rate'] * 100:.4f}% per side, "
           f"slippage {config['execution']['slippage'] * 100:.4f}% per fill, funding not modelled")
+    check = document["timing"]["lookahead_check"]
+    print(f"look-ahead check passed: cut after {check['signal_bars_checked']} of {check['signal_bars']} signal "
+          f"bars and {check['other_bars_checked']} of {check['other_bars']} other bars"
+          + (" (the rest not checked)" if check["sample_seed"] is not None else ""))
     header = f"{'':14}{'trades':>7}{'win %':>8}{'avg R':>8}{'t-stat':>8}{'return %':>10}{'max DD %':>10}"
     print(header)
     for label in ("in_sample", "out_of_sample"):
@@ -136,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--start", help="use only bars from this date (YYYY-MM-DD, UTC)")
     bt.add_argument("--end", help="use only bars before this date (YYYY-MM-DD, UTC)")
     bt.add_argument("--data-dir", default="data")
+    bt.add_argument("--lookahead", choices=list(LOOKAHEAD_MODES), default="default",
+                    help="look-ahead check: 'default' cuts the data after every signal bar (at most "
+                         f"{LOOKAHEAD_SIGNAL_CUTS}), after each of the first {LOOKAHEAD_LEADING_BARS} bars and "
+                         f"after {LOOKAHEAD_OTHER_CUTS} sampled later bars; 'signals' never samples signal bars; "
+                         "'every-bar' cuts after every bar (complete, minutes per run)")
     bt.set_defaults(func=_cmd_backtest)
 
     add_grid_commands(sub)
