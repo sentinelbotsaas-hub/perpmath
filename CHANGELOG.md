@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 - unreleased
+## 0.2.1 (2026-11-22)
 
 Three more example strategies. Nothing else changes: the engine's timing and
 cost rules, the grid simulator and the testnet runner are as in 0.2, and
@@ -39,7 +39,7 @@ Default parameters for the three were written down on 2026-11-21 (UTC),
 before their first run on real data. They were run once and not changed.
 Existing result files are unchanged.
 
-## 0.2.0 - unreleased
+## 0.2.0 (2026-11-19)
 
 Grid backtest and a testnet order runner.
 

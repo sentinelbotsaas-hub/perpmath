@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "package": "perpmath",
-  "package_version": "0.2.0",
-  "generated_at": "2026-11-21T17:31:55Z",
+  "package_version": "0.2.1",
+  "generated_at": "2026-11-21T17:35:26Z",
   "strategy": "breaker_block",
   "symbol": "BTCUSDT",
   "interval": "15m",

@@ -4,7 +4,7 @@ The backtester needs no account and no API key. ``perpmath.live`` (0.2) can
 run the same strategies on the Bybit testnet only; it never connects to mainnet.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from .backtest import LookaheadError, check_no_lookahead, run_backtest
 from .data import Bars, DataError, load_bars
