@@ -1,12 +1,11 @@
 # Changelog
 
-## 0.2.2 - unreleased
+## 0.2.2 (2026-11-22)
 
 A stronger look-ahead check, and one `liquidity_sweep` rule written out. No
-result number changes: the six strategy results and the grid result were
-re-run and are identical outside `package_version`, `generated_at` and
-`timing.lookahead_check`. The shipped files in `results/` have not been
-rewritten yet and still carry the old check's `"shortened_runs": 9`.
+result number changes: the six strategy results and the grid result in
+`results/` were re-run with the new check and are identical outside
+`package_version`, `generated_at` and `timing.lookahead_check`.
 
 ### Look-ahead check
 

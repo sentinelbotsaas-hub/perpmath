@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "package": "perpmath",
-  "package_version": "0.2.0",
-  "generated_at": "2026-11-19T12:44:26Z",
+  "package_version": "0.2.2",
+  "generated_at": "2026-11-21T18:48:40Z",
   "strategy": "grid",
   "symbol": "BTCUSDT",
   "interval": "15m",
@@ -64,7 +64,16 @@
     "intrabar_path": "worst_of_two",
     "lookahead_check": {
       "passed": true,
-      "shortened_runs": 9
+      "method": "fill_cuts",
+      "shortened_runs": 549,
+      "fill_bars": 1658,
+      "fill_bars_checked": 105,
+      "fill_bars_checked_pct": 6.33,
+      "other_bars": 33381,
+      "other_bars_checked": 444,
+      "other_bars_checked_pct": 1.33,
+      "leading_bars_all_checked": 500,
+      "sample_seed": 20261122
     }
   },
   "assumptions": [
