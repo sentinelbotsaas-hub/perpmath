@@ -73,3 +73,42 @@ def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) 
     This is the plain-average ATR, not Wilder's smoothed version.
     """
     return sma(true_range(high, low, close), period)
+
+
+def _confirmed_swing(arr: np.ndarray, left: int, right: int, sign: float) -> np.ndarray:
+    if left < 1 or right < 1:
+        raise ValueError("left and right must be >= 1")
+    arr = np.asarray(arr, dtype=np.float64)
+    out = np.full(len(arr), np.nan)
+    window = left + right + 1
+    if len(arr) >= window:
+        views = sliding_window_view(sign * arr, window)   # each window ends on the confirming bar
+        pivot = views[:, left]
+        is_swing = (pivot > views[:, :left].max(axis=1)) & (pivot > views[:, left + 1:].max(axis=1))
+        out[window - 1:] = np.where(is_swing, sign * pivot, np.nan)
+    return out
+
+
+def confirmed_swing_high(high: np.ndarray, left: int, right: int) -> np.ndarray:
+    """Swing highs, each reported on the bar that confirms it.
+
+    Bar ``p`` is a swing high when its high is strictly above the highs of the
+    ``left`` bars before it and of the ``right`` bars after it. That is only
+    known once bar ``p + right`` has closed, so the level is written at index
+    ``p + right``, never at ``p``. Every other position is NaN. A tie with a
+    neighbouring bar means no swing.
+    """
+    return _confirmed_swing(high, left, right, 1.0)
+
+
+def confirmed_swing_low(low: np.ndarray, left: int, right: int) -> np.ndarray:
+    """Swing lows, each reported on the bar that confirms it (see ``confirmed_swing_high``)."""
+    return _confirmed_swing(low, left, right, -1.0)
+
+
+def carry_forward(arr: np.ndarray) -> np.ndarray:
+    """The most recent non-NaN value at or before each index; NaN until the first one."""
+    arr = np.asarray(arr, dtype=np.float64)
+    seen = np.where(np.isnan(arr), -1, np.arange(len(arr)))
+    seen = np.maximum.accumulate(seen) if len(arr) else seen
+    return np.where(seen >= 0, arr[np.maximum(seen, 0)], np.nan)

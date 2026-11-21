@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.0 - unreleased
+
+Three more example strategies. Nothing else changes: the engine's timing and
+cost rules, the grid simulator and the testnet runner are as in 0.2, and
+mainnet trading is still refused.
+
+- `order_block`, `break_of_structure`, `breaker_block`: three ICT/SMC ideas,
+  each written as one checkable rule set. These ideas are taught from chart
+  examples and have no agreed definition, so each module's docstring states
+  the definition it uses and lists the judgement calls it fixes.
+  - `order_block`: the bar immediately before a run of at least 3
+    same-direction bars that covers 2 x ATR and closes beyond the latest
+    confirmed swing point and beyond that bar. Entry on the first return to
+    the bar's range, stop beyond it, target 2R.
+  - `break_of_structure`: a close beyond the latest confirmed swing high or
+    low (5 bars either side), each level used once. Stop beyond the latest
+    opposite swing, target 2R. Breaks with and against the trend (BOS and
+    CHoCH) are not told apart.
+  - `breaker_block`: an order block (same detection code) that a later bar
+    closes through; entry on the first retest, in the direction of that close.
+- `indicators.confirmed_swing_high`, `confirmed_swing_low`, `carry_forward`.
+  A swing is reported on the bar that completes its right-hand side, never on
+  the pivot bar.
+- Tests: every rule on hand-made bars; swing points are not used before they
+  are confirmed (by hand, and by cutting a synthetic series at every bar);
+  the look-ahead tests now run for all six strategies.
+- `configs/` and `results/` for the three, on the same data file, period,
+  split and costs as the existing results (BTCUSDT 15m, 2025-11-18 to
+  2026-11-18). All three lose money in both periods.
+  `break_of_structure` has 42 out-of-sample trades and is flagged
+  `insufficient_sample`.
+- Entries into a zone are market orders at the open after the bar that
+  returned to it, as in `fvg`. The engine has no resting limit orders; this
+  is now listed under "What is not modelled".
+
+Default parameters for the three were written down on 2026-11-21 (UTC),
+before their first run on real data. They were run once and not changed.
+Existing result files are unchanged.
+
 ## 0.2.0 - unreleased
 
 Grid backtest and a testnet order runner.

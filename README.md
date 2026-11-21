@@ -9,7 +9,8 @@ It is the companion to [perpmath.com](https://perpmath.com): every backtest
 shown there can be reproduced with the commands below.
 
 **This project ships no profitable strategy and makes no return claims.** The
-three example strategies all lose money in the shipped results. The grid
+six example strategies all lose money in the shipped results, in-sample and
+out-of-sample. The grid
 example shows a small gain in its shipped run; the [grid section](#grid-backtest)
 explains why one range-bound year is not evidence that it works. They are here
 to show how the accounting works, not to be traded.
@@ -79,12 +80,31 @@ the look-ahead check fails.
 | `fvg` | Enters on the first return into a three-candle fair value gap, stop beyond the gap, target at 2R | [fvg.py](src/perpmath/strategies/fvg.py) |
 | `liquidity_sweep` | Fades a bar that takes out the prior 20-bar high or low and closes back inside, target at 2R | [liquidity_sweep.py](src/perpmath/strategies/liquidity_sweep.py) |
 | `ma_cross` | 20/50 simple moving-average cross with an ATR stop; the boring baseline | [ma_cross.py](src/perpmath/strategies/ma_cross.py) |
+| `order_block` | Enters on the first return to the last opposite candle before a three-bar, 2 x ATR move that closed beyond the latest swing point; stop beyond the candle, target at 2R | [order_block.py](src/perpmath/strategies/order_block.py) |
+| `break_of_structure` | Follows a close beyond the latest confirmed swing high or low (5 bars either side), stop beyond the opposite swing, target at 2R | [break_of_structure.py](src/perpmath/strategies/break_of_structure.py) |
+| `breaker_block` | Takes an order block that price has closed through and enters on its first retest, in the direction of that close; target at 2R | [breaker_block.py](src/perpmath/strategies/breaker_block.py) |
 
 The exact rules are in each file's docstring. Parameters live in
 `configs/*.json`. They were fixed once, before the first run on real data, and
 have not been adjusted since. Fair value gaps and liquidity sweeps have no
 agreed standard parameters, so these are one reasonable choice, not the
 definition. There is no optimizer in 0.1.
+
+Order blocks, breaks of structure and breaker blocks are looser still: they
+are taught from chart examples, and two teachers will mark the same chart
+differently. Each of those three modules therefore states the one definition
+it tests and lists the judgement calls it had to fix (which candle is the
+block, how big a move counts, wick or close, how many bars make a swing). A
+result for `order_block` is a result for that definition, not for every
+reading of the idea. Their parameters reuse the values the first three
+strategies already had (ATR 14, 96 bars of waiting, 0.1 x ATR stop buffer,
+2R) plus three new ones written down before the first run: swings of 5 bars
+either side, an impulse of 3 bars, and a minimum move of 2 x ATR. No other
+values were run.
+
+A swing high or low is only known after the bars to its right have closed.
+The strategies use it from that bar on and not before; this is tested
+separately (see [Tests](#tests)).
 
 ## Shipped results
 
@@ -101,12 +121,33 @@ In-sample is the first 70% of the period (to 2026-07-31), out-of-sample the rest
 | liquidity_sweep | out-of-sample | 688 | 28.20% | -0.79 | -8.48 | -69.03% | 69.31% |
 | ma_cross | in-sample | 572 | 20.80% | -0.31 | -2.95 | -62.35% | 63.33% |
 | ma_cross | out-of-sample | 263 | 19.01% | -0.05 | -0.68 | -18.46% | 31.18% |
+| order_block | in-sample | 325 | 30.77% | -0.61 | -3.77 | -42.33% | 46.92% |
+| order_block | out-of-sample | 141 | 24.11% | -0.98 | -2.49 | -18.71% | 24.94% |
+| break_of_structure | in-sample | 149 | 31.54% | -0.17 | -1.57 | -43.34% | 53.72% |
+| break_of_structure | out-of-sample | 42\* | 40.48% | 0.06 | -0.11 | -3.35% | 23.57% |
+| breaker_block | in-sample | 243 | 33.74% | -0.56 | -1.56 | -18.44% | 21.23% |
+| breaker_block | out-of-sample | 120 | 30.83% | -0.79 | -2.88 | -15.07% | 16.62% |
 
-All three lose. The full output, including every trade, is in `results/`.
-The average trade loses between 0.07% and 0.18% of its notional, which is the
-same size as the round-trip cost assumed here (0.11% in fees plus 0.04% in
-slippage). You can see how much of the loss is cost by copying a config,
-setting `fee_rate` and `slippage` to 0 and running it again.
+\* Fewer than 100 trades. The result file marks this block
+`insufficient_sample`: treat every number in the row as noise, the positive
+average R included. `break_of_structure` holds a position for about 150 to
+230 bars on average because its stop sits at the opposite swing, and it
+ignores new breaks while it is in one, so a year of 15-minute bars gives it
+few trades. Its parameters were not changed to get more.
+
+All six lose, in both periods. The full output, including every trade, is in
+`results/`. The average trade loses between 0.05% and 0.35% of its notional.
+In eleven of the twelve rows it is 0.18% or less, which is the same size as
+the round-trip cost assumed here (0.11% in fees plus 0.04% in slippage). The
+exception is `break_of_structure` in-sample at 0.35%, more than twice that
+cost, so cost alone does not account for it. You can see how much of a loss
+is cost by copying a config, setting `fee_rate` and `slippage` to 0 and
+running it again.
+
+Average R and total return can point in different directions, as in the
+`break_of_structure` out-of-sample row (+0.06 R, -3.35%). R counts every
+trade equally, whatever the distance to its stop; the return is compounded on
+the full position, so trades with a far stop move it more.
 
 ## How results are computed
 
@@ -169,6 +210,11 @@ its section.
   hours. Strategies that hold for long periods, `ma_cross` in particular, would
   show different results with funding included.
 - Leverage, margin and liquidation. Notional is capped at 100% of equity.
+- **Resting limit orders.** `fvg`, `order_block` and `breaker_block` are
+  usually described with a limit order waiting at the edge of the zone. The
+  engine only has market orders at the next open, so these three enter at the
+  open after the bar that came back to the zone. The fill can be better or
+  worse than the zone edge, and it pays the taker fee.
 - Maker fees, partial fills, latency, order-book depth and market impact.
 - The order of events inside a bar, beyond the stop-first rule above.
 
@@ -524,7 +570,10 @@ pytest
 ```
 
 The tests cover look-ahead, fee and slippage arithmetic, metrics on a
-hand-computed example, each strategy's rules on hand-made bars, the
+hand-computed example, each strategy's rules on hand-made bars (entry, no
+entry, stop, target, expiry and failure of a zone), swing points not being
+used before the bars to their right have closed (by hand, and by cutting a
+synthetic series at every bar and comparing the decisions), the
 downloader's pagination against a fake endpoint, the grid simulator (start
 rules, fill prices, fees and funding by hand, both intrabar paths on a bar
 where they disagree, the three range-exit modes, the liquidation threshold,

@@ -14,12 +14,15 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from . import fvg, liquidity_sweep, ma_cross
+from . import break_of_structure, breaker_block, fvg, liquidity_sweep, ma_cross, order_block
 
 STRATEGIES = {
     "fvg": fvg,
     "liquidity_sweep": liquidity_sweep,
     "ma_cross": ma_cross,
+    "order_block": order_block,
+    "break_of_structure": break_of_structure,
+    "breaker_block": breaker_block,
 }
 
 
