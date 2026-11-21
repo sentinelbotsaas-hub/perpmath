@@ -153,6 +153,22 @@ def _parse_page(payload: object, step: int) -> List[Row]:
     return rows
 
 
+# Bybit retCode for "too many visits" and "IP rate limit" (docs/v5/error).
+RATE_LIMIT_CODES = (10006, 10018)
+RATE_LIMIT_WAITS = (2.0, 5.0, 10.0, 20.0)   # seconds before each retry
+
+
+def fetch_page(fetch: Fetch, url: str, params: Dict[str, str]) -> object:
+    """One page from ``fetch``. A rate-limit reply is retried after 2, 5, 10 and
+    20 seconds; the fifth one is returned as it is, so the caller reports it."""
+    for wait in (*RATE_LIMIT_WAITS, None):
+        payload = fetch(url, params)
+        limited = isinstance(payload, dict) and payload.get("retCode") in RATE_LIMIT_CODES
+        if not limited or wait is None:
+            return payload
+        time.sleep(wait)
+
+
 def fetch_klines(
     symbol: str,
     interval: str,
@@ -178,7 +194,7 @@ def fetch_klines(
     collected: Dict[int, Row] = {}
     first_page = True
     while cursor >= start_ms:
-        payload = fetch(BYBIT_KLINE_URL, {
+        payload = fetch_page(fetch, BYBIT_KLINE_URL, {
             "category": CATEGORY,
             "symbol": symbol,
             "interval": code,

@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .data import CATEGORY, DataError, Fetch, http_get_json, iso_utc
+from .data import CATEGORY, DataError, Fetch, fetch_page, http_get_json, iso_utc
 
 BYBIT_FUNDING_URL = "https://api.bybit.com/v5/market/funding/history"
 FUNDING_PAGE_LIMIT = 200
@@ -90,7 +90,7 @@ def fetch_funding(symbol: str, start_ms: int, end_ms: int,
     collected: Dict[int, FundingRow] = {}
     first_page = True
     while cursor >= start_ms:
-        payload = fetch(BYBIT_FUNDING_URL, {
+        payload = fetch_page(fetch, BYBIT_FUNDING_URL, {
             "category": CATEGORY,
             "symbol": symbol,
             "startTime": str(start_ms),

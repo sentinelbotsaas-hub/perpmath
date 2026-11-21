@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `perpmath download` and `perpmath funding` now wait and retry when Bybit
+  answers with a rate-limit code (10006 or 10018): after 2, 5, 10 and 20
+  seconds. Before, the first such reply ended a long download, for example a
+  year of 1-minute candles.
+
 ## 0.2.2 (2026-11-22)
 
 A stronger look-ahead check, and one `liquidity_sweep` rule written out. No

@@ -142,3 +142,23 @@ def test_cli_download_exits_non_zero_on_bad_data(tmp_path, monkeypatch, capsys):
     assert code == 1
     assert "error:" in capsys.readouterr().err
     assert list(tmp_path.iterdir()) == []                         # nothing half-written
+
+
+def test_a_rate_limit_reply_is_retried_then_reported(monkeypatch):
+    waits = []
+    monkeypatch.setattr(data.time, "sleep", waits.append)
+    fake = FakeBybit(bars=10)
+    limited = {"retCode": 10006, "retMsg": "Too many visits!", "result": {}, "time": T0}
+    replies = [limited, limited]
+
+    def flaky(url, params):
+        return replies.pop() if replies else fake(url, params)
+
+    rows = fetch_klines("BTCUSDT", "15m", T0, T0 + 10 * STEP, fetch=flaky, pause=0)
+    assert len(rows) == 10 and waits == [2.0, 5.0]
+
+    # Still limited after every wait: the error names the code instead of looping for ever.
+    waits.clear()
+    with pytest.raises(DataError, match="10006"):
+        fetch_klines("BTCUSDT", "15m", T0, T0 + STEP, fetch=lambda url, params: limited, pause=0)
+    assert waits == list(data.RATE_LIMIT_WAITS)
